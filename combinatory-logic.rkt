@@ -51,9 +51,8 @@
 
 (define/contract (subst-app-context subst context)
   (-> subst? context? context?)
-  (map (match-lambda [(cons x A)
-                      (cons x (subst-app subst A))])
-       context))
+  (dict-map context (λ (x A)
+                      (cons x (subst-app subst A)))))
 
 (define/contract (subst-compose s2 s1)
   (-> subst? subst? subst?)
@@ -61,7 +60,12 @@
              [result s2])
     (match s1
       ['()                      result]
-      [(list (cons x A) s1 ...) (hash-set result x (subst-app s2 A))])))
+      [(list (cons x A) s1 ...) (loop s1
+                                      (hash-set result x (subst-app s2 A)))])))
+
+(module+ test
+  (check-equal? (subst-compose (hasheq 'c 'd) (hasheq 'a 'd 'b 'e))
+                (hasheq 'a 'd 'b 'e 'c 'd)))
 
 ; now let's think about how type inference is going to work.
 ;
@@ -107,12 +111,13 @@
     [(? symbol? b) (eq? a b)]
     [`(→ ,A ,B)    (or (occurs-in? a A) (occurs-in? a B))]))
 
-(define/contract (unify equations [subst (hash)]) ; the subst parameter is a loop variable basically
-                                                  ; although specifying an initial one might come in
-                                                  ; handy sometimes (but it won't for us right now)
+(define log (make-parameter #f))
+
+(define/contract (unify equations [subst (hasheq)])
   (->* ((listof equation?)) (subst?) subst?)
+  (when (log) (displayln (format "~a  |  ~a" equations subst))) ; for debugging
   (match equations
-    ['()                             subst]
+    ['()                             (unify equations subst)]
     [(list `(= ,A ,B) equations ...)
      (match* (A B)
        ; if two terms are equal, nothing needs to be done to unify them
@@ -125,12 +130,12 @@
        ; - otherwise, we know that we need to replace the type variable with the other type as part
        ;   of the substitution to be returned. we should also do this replacement in all the
        ;   remaining equations and in the substitution we have so far, in order to eliminate a from
-       ;   the system for good
+       ;   the system for good 
        [((? symbol? a) A)       (if (occurs-in? a A)
                                     (raise-arguments-error
                                      'unify "type variable not unifiable with type it occurs in"
                                      "type variable" a "type" A)
-                                    (let ([s (hash a A)])
+                                    (let ([s (hasheq a A)])
                                       (unify
                                        (map (match-lambda [`(= ,A ,B)
                                                            `(= ,(subst-app s A) ,(subst-app s B))])
@@ -140,8 +145,24 @@
        [(A a)                   (unify (cons `(= ,a ,A) equations) subst)])]))
 
 (module+ test
-  (check-equal? (unify '((= (→ a b) (→ b a)))) (hash 'a 'b))
-  (check-equal? (unify '((= (→ (→ a b) (→ b a)) (→ c c)))) (hash 'c '(→ a a) 'b 'a)))
+  (check-equal? (unify '((= (→ a b) (→ b a)))) (hasheq 'a 'b))
+  (check-equal? (unify '((= (→ (→ a b) (→ b a)) (→ c c)))) (hasheq 'c '(→ a a) 'b 'a))
+  ; regression tests below! these failed with my original code
+  ; this one failed because i forgot to call the loop again in the inductive case of subst-compose
+  (check-equal? (unify '((= (→ (→ a (→ b c)) (→ (→ a b) (→ a c)))
+                            (→ (→ d (→ e d)) f))) (hasheq))
+                (hasheq 'a 'd
+                        'b 'e
+                        'c 'd
+                        'f '(→ (→ d e) (→ d d))))
+  ; and similarly this one failed because i forgot to continue the tail recursion in the case where
+  ; the two sides of the equation are equal, and instead just returned the current substitution
+  (check-equal? (unify '((= (→ (→ (→ a (→ b c)) (→ a b)) (→ (→ a (→ b c)) (→ a c)))
+                           (→ (→ (→ d e) (→ d d)) f))))
+                (hasheq 'a 'd
+                        'e '(→ d c)
+                        'b 'd
+                        'f '(→ (→ d (→ d c)) (→ d c)))))
 
 (define/contract (unify-contexts Γ Δ) ; helper function to unify contexts
   (-> context? context? context?)
@@ -193,7 +214,7 @@
 
 (define/contract (normalizer vars)
   (-> (listof symbol?) subst?)
-  (make-immutable-hash
+  (make-immutable-hasheq
    (map cons vars (map type-var-ref (range (length vars))))))
 
 (define/contract (type-vars-in A)
