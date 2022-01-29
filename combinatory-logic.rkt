@@ -1,5 +1,4 @@
 #lang racket
-(require syntax/parse/define)
 (module+ test (require rackunit))
 
 (define type?
@@ -117,11 +116,11 @@
   (->* ((listof equation?)) (subst?) subst?)
   (when (log) (displayln (format "~a  |  ~a" equations subst))) ; for debugging
   (match equations
-    ['()                             (unify equations subst)]
+    ['()                             subst]
     [(list `(= ,A ,B) equations ...)
      (match* (A B)
        ; if two terms are equal, nothing needs to be done to unify them
-       [(A A)                   subst]
+       [(A A)                   (unify equations subst)]
        ; to unify two function types, unify the argument types and unify the return types
        [(`(→ ,A ,B) `(→ ,C ,D)) (unify (list* `(= ,A ,C) `(= ,B ,D) equations) subst)]
        ; to unify a type variable with another type:

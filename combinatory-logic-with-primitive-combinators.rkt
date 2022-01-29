@@ -28,7 +28,6 @@
 ; make it a sort of tracking variable we use during the type inference algorithm. This is what we'll
 ; eventually have to do when we get to λ-calculus, but I'll put it off for now.
 
-(require syntax/parse/define)
 (module+ test (require rackunit))
 
 ; let's separate out all the type-related stuff, which is mostly unchanged from
