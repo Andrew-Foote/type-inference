@@ -1,37 +1,21 @@
 #lang racket
-
-; The type inference system we introduced in combinatory-logic.rkt is nice and simple, but it only
-; works if the underlying calculus is combinatory logic without any primitive combinators---which is
-; a completely useless calculus! (It's Curry-Howard equivalent to a Hilbert system without any
-; axioms, only the modus ponens rule of inference.)
-;
-; A more practical combinatory logic system will have some primitive combinators with pre-defined
-; type schemes---for example, S with type scheme '(→ (→ a (→ b c)) (→ (→ a b) (→ a c))) and K with
-; type schemes '(→ a (→ b a)). Note that these are type *schemes*, which means different occurrences
-; of the primitive combinators can have types that instantiate the scheme in different ways---for
-; example '(K K) should have the principal type '(→ c (→ a (→ b a))), from instanting the first K as
-; '(→ (→ a (→ b a)) (→ c (→ a (→ b a)))) and the second K as '(→ a (→ b a)).
-;
-; The way we deal with this is straightforward in principle---when inferring the type of a primitive
-; combinator, we simply instantiate its type scheme with fresh type variables. However, the way our
-; algorithm works at the moment is that we infer a context, rather than inferring a type directly.
-; A context assigns types to each term variable, but with a primitive combinator, there's no
-; variable to assign the inferred type to. We can't simply treat the primitive combinator as a
-; variable because it will have different types in different places, unlike a variable.
-;
-; There are different ways to deal with this. The one I prefer is to simply have the context assign
-; a type to each occurrence of a primitive combinator, as well as each variable. We can encode
-; "occurrences" elegantly as continuations, i.e. "terms with holes"---the hole is where the
-; primitive combinator occurs.
-;
-; Another approach would be to give up on having the context have an independent meaning, and just
-; make it a sort of tracking variable we use during the type inference algorithm. This is what we'll
-; eventually have to do when we get to λ-calculus, but I'll put it off for now.
-
 (module+ test (require rackunit))
 
-; let's separate out all the type-related stuff, which is mostly unchanged from
-; combinatory-logic.rkt, from the term-related stuff
+; An even better way of dealing with the limitations of combinatory logic is to introduce
+; λ-abstraction terms, turning the system into a λ-calculus. This is a kind of means of defining
+; primitive combinators into the formal system itself.
+;
+; So let's forget about primitive combinators for now. That means our contexts don't need to assign
+; types to arbitrary continuations any more. On the other hand, the addition of λ-abstractions adds
+; its own complications to the notion of a context. Term variables now exist within a particular
+; scope, so they no longer have to be assigned the same type wherever they occur in a term. Two
+; occurrences of the same variable need only be assigned the same type if they are feee, or if they
+; are bound by the same λ-binder.
+;
+; Fortunately there's a fairly simple way to deal with this: just have a context assign a type to
+; to each occurrence of a variable within a λ-binder, as well as each free variable.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define type?
   (flat-rec-contract
@@ -135,7 +119,6 @@
   (-> type? type?)
   (subst-app (normalizer (type-vars-in type)) type))
 
-; we need these new helper functions to replace all the type variables in a type with fresh ones
 (define/contract (freshener vars)
   (-> (listof symbol?) subst?)
   (make-immutable-hasheq
@@ -150,27 +133,36 @@
 (define term?
   (flat-rec-contract
    term?
-   symbol? ; term variable or primitive combinator
-   (list/c term? term?))) ; application
-
-; hash to distinguish primitive combinators from term variables and assign their type schemes
-(define/contract prim-combs (hash/c symbol? type? #:immutable #f) (make-hasheq))
+   symbol? ; term variable
+   (list/c term? term?) ; application
+   (list/c 'λ symbol? term?))) ; abstraction
 
 (define cont?
   (flat-rec-contract
    cont?
    '() ; the hole
    (list/c cont? term?)
-   (list/c term? cont?)))
+   (list/c term? cont?)
+   (list/c 'λ symbol? cont?)))
+
+(define scope? ; like a continuation, but the hole has to be in a λ-binder
+  (flat-rec-contract
+   scope?
+   (list/c 'λ '() term?)
+   (list/c 'λ symbol? scope?)
+   (list/c scope? term?)
+   (list/c term? scope?)))
 
 (define (-cont-app k t) ; replace the hole in k with t
   (match k
-    ['()                t]
-    [(? symbol? x)      x]
-    [`(,(? cont? k) ,u) `(,(-cont-app k t) ,u)]
-    [`(,u ,(? cont? k)) `(,u ,(-cont-app k t))]))
+    ['()                  t]
+    [(? symbol? x)        x]
+    [`(,(? cont? k) ,u)   `(,(-cont-app k t) ,u)]
+    [`(,u ,(? cont? k))   `(,u ,(-cont-app k t))]
+    [`(λ ,x ,(? cont? k)) `(λ ,x ,(-cont-app k t))]))
 
-; -cont-app is the common implementation of two functions with different contracts
+; -cont-app is the common implementation of three functions with different contracts
+; (we now have scopes as a third possible second argument/result type)
 
 (define/contract (cont-app k t)
   (-> cont? term? term?)
@@ -180,30 +172,31 @@
   (-> cont? cont? cont?)
   (-cont-app k2 k1))
 
-(define context? (listof (cons/c (or/c symbol? cont?) type?)))
+(define/contract (cont-app-scope k s)
+  (-> cont? scope? scope?)
+  (-cont-app k s))
 
-; we have a new cont argument, which contains the continuation of the term
-(define/contract (type-of term context [cont '()])
+(define context? (listof (cons/c (or/c symbol? scope?) type?)))
+
+(define/contract (type-of term context [cont '()]) ; non-inferred
   (->* (term? context?) (cont?) type?)
   (match term
-    [(? symbol? x) (let ([is-prim-comb (hash-ref prim-combs x #f)])
-                     (if is-prim-comb
-                         (dict-ref context cont
-                                   (thunk (raise-arguments-error
-                                           'type-of
-                                           "primitive combinator occurrence has no assigned type"
-                                           "primitive combinator" x
-                                           "occurrence" cont)))
-                         (dict-ref context x
-                                   (thunk (raise-arguments-error
-                                           'type-of "variable type unassigned"
-                                           "variable" x)))))]
+    [(? symbol? x) (dict-ref context x
+                             (thunk (raise-arguments-error
+                              'type-of "free variable type unassigned"
+                              "free variable" x)))]
     [`(,t ,u)      (match* ((type-of t context (cont-app-cont cont `(() ,u)))
                             (type-of u context (cont-app-cont cont `(,t ()))))
                      [(`(→ ,A ,B) A) B]
                      [(A B)          (raise-arguments-error
                                       'type-of "ill-typed application"
-                                      "function type" A "argument type" B)])]))
+                                      "function type" A "argument type" B)])]
+    [`(λ ,x ,t)    (let* ([A (dict-ref context (cont-app-scope cont `(λ () ,t))
+                                       (thunk (raise-arguments-error
+                                               'type-of "bound variable type unassigned"
+                                               "bound variable" x "scope" t)))]
+                          [B (type-of t (dict-set context x A) (cont-app-cont cont `(λ ,x ())))])
+                     `(→ ,A ,B))]))
 
 (define/contract (subst-app-context subst context)
   (-> subst? context? context?)
@@ -213,8 +206,8 @@
 (define/contract (cont-app-context cont context)
   (-> cont? context? context?)
   (dict-map context (λ (k A)
-                      (cons (if (cont? k)
-                                (cont-app-cont cont k)
+                      (cons (if (scope? k)
+                                (cont-app-scope cont k)
                                 k)
                             A))))
 
@@ -235,11 +228,7 @@
   (->* (term?) (cont?) context?)
   (match t
     [(? symbol? x)
-     (list
-      (let ([A (hash-ref prim-combs x #f)])
-        (if A
-            (cons cont (freshen A))
-            (cons x (gensym)))))]
+     `((,x . ,(gensym)))]
     [`(,t ,u)
      (let ([t-cont (cont-app-cont cont `(() ,u))]
            [u-cont (cont-app-cont cont `(,t ()))])
@@ -248,7 +237,13 @@
          (let ([Θ (unify-contexts Γ Δ)])
            (let ([A (type-of t Θ t-cont)]
                  [B (type-of u Θ u-cont)])
-             (subst-app-context (unify `((= ,A (→ ,B ,(gensym))))) Θ)))))]))
+             (subst-app-context (unify `((= ,A (→ ,B ,(gensym))))) Θ)))))]
+    [`(λ ,x ,t)
+     (let ([x-scope (cont-app-scope cont `(λ () ,t))]
+           [t-cont (cont-app-cont cont `(λ ,x ()))])
+       (let ([Γ (infer-context-for t t-cont)])
+         (let ([A (dict-ref Γ x #f)])
+           (dict-set (dict-remove Γ x) x-scope (or A (gensym))))))]))
 
 (define/contract (infer-type-of t)
   (-> term? type?)
@@ -270,51 +265,32 @@
                 '((x . a) (g . (→ a b)) (f . (→ b c))))
   (check-equal? (normalize-context (infer-context-for '((f x) (g x))))
                 '((x . a) (g . (→ a b)) (f . (→ a (→ b c)))))
-  (check-exn exn:fail? (thunk (infer-context-for '(f f)))))
+  (check-exn exn:fail? (thunk (infer-context-for '(f f))))
+  (check-equal? (normalize-context (infer-context-for '(λ x x)))
+                '(((λ () x) . a)))
+  (check-equal? (normalize-context (infer-context-for '(λ x (λ y x))))
+                '(((λ x (λ () x)) . a) ((λ () (λ y x)) . b)))
+  (check-equal? (normalize-context (infer-context-for '(λ x (λ y (λ z ((x z) (y z)))))))
+                '(((λ x (λ y (λ () ((x z) (y z))))) . a)
+                  ((λ x (λ () (λ z ((x z) (y z))))) . (→ a b))
+                  ((λ () (λ y (λ z ((x z) (y z))))) . (→ a (→ b c)))))
+  (check-exn exn:fail? (thunk (infer-context-for '(λ f (f f))))))
 
-; the classic S and K combinators
-(hash-set! prim-combs 'S '(→ (→ a (→ b c)) (→ (→ a b) (→ a c))))
-(hash-set! prim-combs 'K '(→ a (→ b a)))
+; one way to define abbreviations, which works fine:
 
-(module+ test
-  (check-equal? (normalize-context (infer-context-for 'K))
-                '((() . (→ a (→ b a)))))
-  (check-equal? (normalize-context (infer-context-for '(K K)))
-                '(((K ()) . (→ a (→ b a)))
-                  ((() K) . (→ (→ a (→ b a)) (→ c (→ a (→ b a))))))))
-
-(define I '((S K) K))
-
-(module+ test
-  (check-equal? (normalize-context (infer-context-for I))
-                '((((S K) ()) . (→ a (→ b a)))
-                  (((S ()) K) . (→ a (→ (→ b a) a)))
-                  (((() K) K) . (→ (→ a (→ (→ b a) a)) (→ (→ a (→ b a)) (→ a a)))))))
-
-(define B '((S (K S)) K))
+(define I '(λ x x))
 
 (module+ test
-  (check-equal? (normalize-context (infer-context-for B))
-                '((((S (K S)) ()) . (→ (→ a b) (→ c (→ a b))))
-                  (((S (K ())) K) . (→ (→ c (→ a b)) (→ (→ c a) (→ c b))))
-                  (((S (() S)) K) . (→ (→ (→ c (→ a b)) (→ (→ c a) (→ c b)))
-                                       (→ (→ a b) (→ (→ c (→ a b)) (→ (→ c a) (→ c b))))))
-                  (((() (K S)) K) . (→ (→ (→ a b) (→ (→ c (→ a b)) (→ (→ c a) (→ c b))))
-                                       (→ (→ (→ a b) (→ c (→ a b)))
-                                          (→ (→ a b) (→ (→ c a) (→ c b)))))))))
+  (check-equal? (normalize (infer-type-of I)) '(→ a a))
+  (check-equal? (normalize (infer-type-of `(,I ,I))) '(→ a a)))
 
-(define W '((S S) (S K)))
+; but what about this?
+
+(define (-let x t u) `((λ ,x ,u) ,t))
 
 (module+ test
-  (check-equal? (normalize (infer-type-of W))
-                '(→ (→ a (→ a b)) (→ a b)))
-  (check-equal? (normalize (infer-type-of `(,W K)))
-                '(→ a a)))
+  (check-equal? (normalize (infer-type-of (-let 'I '(λ x x) 'I))) '(→ a a))
+  (check-exn exn:fail? (thunk (infer-type-of (-let 'I '(λ x x) '(I I))))))
 
-(define C `((S ((S (K ,B)) S)) (K K)))
-
-(module+ test
-  (check-equal? (normalize (infer-type-of C))
-                '(→ (→ a (→ b c)) (→ b (→ a c)))))
-
-(hash-set! prim-combs 'P '(→ (→ (→ a b) a) a)) ; Peirce's law
+; since each variable has to have a single type within its scope, I as a variable cannot have both
+; the types '(→ (→ a a) (→ a a)) and '(→ a a), even though it can as a simple abbreviation
