@@ -1,5 +1,4 @@
 #lang racket
-
 ; The type inference system we introduced in combinatory-logic.rkt is nice and simple, but it only
 ; works if the underlying calculus is combinatory logic without any primitive combinators---which is
 ; a completely useless calculus! (It's Curry-Howard equivalent to a Hilbert system without any
@@ -312,9 +311,28 @@
                 '(→ a a)))
 
 (define C `((S ((S (K ,B)) S)) (K K)))
+; our "natural" proof: `(((((,B (,B S)) ,B) ,B) S) (K K)))
 
 (module+ test
   (check-equal? (normalize (infer-type-of C))
                 '(→ (→ a (→ b c)) (→ b (→ a c)))))
 
 (hash-set! prim-combs 'P '(→ (→ (→ a b) a) a)) ; Peirce's law
+
+(define (sequent t)
+  (let ([Γ (normalize-context (infer-context-for t))])
+    `(⊢ ,@(dict-map (filter (match-lambda [(cons x/k A) (term? x/k)]) Γ)
+                    (λ (x A) `(: ,x ,A)))
+        ,(type-of t Γ))))
+
+(define (display-sequent t)
+  (for ([x (cdr (sequent t))])
+    (displayln x)))
+
+; from (a -> c) -> d
+; infer (b -> c) -> ((a -> b) -> d)
+
+; ((A -> C) -> D) -> (B -> C) -> (A -> B) -> D
+
+; from (stl -> lst) -> remaining
+; infer (lst -> newlst) -> (stl -> lst) -> remaining
